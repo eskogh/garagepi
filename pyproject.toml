@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "garagepi"
+version = "0.1.0"
+description = "Flask + GPIO garage door controller with MQTT (Home Assistant discovery)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "Erik Skogh"}]
+dependencies = [
+  "Flask>=3.0.0",
+  "paho-mqtt>=2.0.0",
+  "RPi.GPIO; platform_machine in ['armv6l', 'armv7l', 'aarch64'] and platform_system == 'Linux'"
+]
+
+[project.scripts]
+garagepi = "garagepi.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+garagepi = ["templates/*.html", "systemd/*.service"]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "ruff",
+  "black"
+]
