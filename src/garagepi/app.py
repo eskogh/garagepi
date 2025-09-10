@@ -5,7 +5,7 @@ import signal
 import atexit
 
 from flask import Flask, jsonify, render_template, request, abort
-from .gpio import setup_default, GPIO  # import GPIO for cleanup
+from .gpio import setup_default
 from . import mqtt as hamq
 
 # --- Pins / timings ---
