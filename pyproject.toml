@@ -13,7 +13,7 @@ authors = [{name = "Erik Skogh"}]
 dependencies = [
   "Flask>=3.0.0",
   "paho-mqtt>=2.0.0",
-  "RPi.GPIO; platform_machine in ['armv6l', 'armv7l', 'aarch64'] and platform_system == 'Linux'"
+  "RPi.GPIO; sys_platform == 'linux' and platform_machine != 'x86_64'"
 ]
 
 [project.scripts]
