@@ -1,11 +1,14 @@
 # GaragePi – Flask + GPIO + MQTT (Home Assistant Discovery)
 
 A tiny Flask app to control a garage door relay on Raspberry Pi GPIO, with:
-- debounced sensor reads + edge callbacks
+- Debounced sensor reads + edge callbacks
 - “Close Mode” (auto-close enforcement)
-- secure API (optional bearer token)
+- Secure API (optional bearer token)
 - **MQTT Discovery** for Home Assistant (Cover + Switch)
-- neon-styled single-page UI
+- Neon-styled single-page UI
+- Optional **Plate Watcher** integration for automatic opening via license plate recognition
+
+---
 
 ## Hardware
 
@@ -13,6 +16,8 @@ A tiny Flask app to control a garage door relay on Raspberry Pi GPIO, with:
 - **PIN_SENSOR_OPEN**: magnetic/reed or limit switch for *open*
 - **PIN_SENSOR_CLOSED**: magnetic/reed or limit switch for *closed*
 Pull-downs assumed; invert in code if your wiring differs.
+
+---
 
 ## Install
 
@@ -22,11 +27,13 @@ sudo apt install -y python3-pip
 pip install -e .
 ```
 
+---
+
 ## Configure
 
 Set environment variables (create a `.env` or export in your service):
 
-```
+```bash
 # Flask
 HOST=0.0.0.0
 PORT=5000
@@ -39,9 +46,6 @@ PIN_SENSOR_CLOSED=16
 
 # Behavior
 TRIGGER_PULSE_S=0.5
-DEBOUNCE_MS=50
-STATUS_CHECK_S=0.25
-AUTO_CLOSE_CHECK_S=2.0
 MIN_TOGGLE_GAP_S=2.0
 
 # MQTT / HA
@@ -54,6 +58,8 @@ DISCOVERY_PREFIX=homeassistant
 NODE_ID=garagepi
 MQTT_BASE=garagepi
 ```
+
+---
 
 ## Run
 
@@ -73,37 +79,22 @@ python -m garagepi
 
 ## systemd service (recommended)
 
-A helper installer script (`install-server.sh`) is included.  
-It will:
-- Ensure you run as root
-- Prompt for MQTT and API config values
-- Write an environment file to `/etc/default/garagepi`
-- Copy the unit file to `/etc/systemd/system/garagepi.service`
-- Enable and start the service
-- Apply basic hardening options
-
-Run it like this:
+Use the provided interactive installer:
 
 ```bash
-sudo ./install-server.sh
+sudo ./install-service.sh
 ```
 
-You can then check logs:
+This will:
+- Prompt for configuration (pins, MQTT, etc.)
+- Write `/etc/default/garagepi`
+- Install and enable `garagepi.service`
+
+Check status with:
 
 ```bash
+systemctl status garagepi
 journalctl -u garagepi -f
-```
-
-And edit config at:
-
-```
-/etc/default/garagepi
-```
-
-Restart the service after config changes:
-
-```bash
-sudo systemctl restart garagepi
 ```
 
 ---
@@ -137,10 +128,46 @@ sudo systemctl restart garagepi
 
 - On non-Pi machines the app uses a **GPIO shim** so you can develop the Flask/MQTT logic without hardware.
 
+Run linting and tests:
+
+```bash
+make lint
+make test
+```
+
+---
+
+## Plate Watcher (optional)
+
+A companion service that watches your RTSP/ONVIF camera and triggers GaragePi if your car’s plate is detected using the Plate Recognizer API.
+
+### Install
+
+```bash
+sudo ./install-plate-watcher.sh
+```
+
+This will:
+- Prompt for RTSP URL, approved plates, Plate Recognizer API token, and GaragePi settings
+- Write `/etc/default/plate_watcher`
+- Install and enable `plate_watcher.service`
+
+Logs:
+
+```bash
+journalctl -u plate_watcher -f
+```
+
 ---
 
 ## Troubleshooting
 
-- **No entities appear in HA**: check MQTT Discovery prefix (`homeassistant`) and that HA is connected to the same broker. Verify `homeassistant/#` topics show config with `mosquitto_sub`.
-- **State wrong**: invert your sensor wiring or adjust the logic in `_read_state()`.
+- **No entities appear in HA**: check MQTT Discovery prefix (`homeassistant`) and that HA is connected to the same broker. Verify topics with `mosquitto_sub -t 'homeassistant/#'`.
+- **State wrong**: invert your sensor wiring or adjust logic in `_read_state()`.
 - **Spam or double toggles**: increase `MIN_TOGGLE_GAP_S`.
+
+---
+
+## License
+
+MIT License – see [LICENSE](LICENSE).
