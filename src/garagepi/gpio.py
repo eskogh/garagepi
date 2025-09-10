@@ -1,5 +1,6 @@
 try:
     import RPi.GPIO as GPIO
+
     ON_PI = True
 except Exception:
     ON_PI = False

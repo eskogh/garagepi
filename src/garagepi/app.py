@@ -203,7 +203,9 @@ def state_publish_loop() -> None:
 # --- Flask routes ---
 @app.route("/")
 def index():
-    return render_template("index.html", door_status=check_door_status(), close_mode=close_mode)
+    return render_template(
+        "index.html", door_status=check_door_status(), close_mode=close_mode
+    )
 
 
 @app.route("/status")

@@ -17,7 +17,9 @@ def connect(client_id: str, host: str, port: int, user: str = "", password: str 
     return client
 
 
-def publish_discovery(c, prefix, node_id, avail, state_topic, cmd_topic, cm_state, cm_set):
+def publish_discovery(
+    c, prefix, node_id, avail, state_topic, cmd_topic, cm_state, cm_set
+):
     if not c:
         return
     cover_cfg_topic = f"{prefix}/cover/{node_id}/cover/config"
