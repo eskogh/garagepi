@@ -1,8 +1,16 @@
 import os
 import time
 import io
-import requests
-import cv2
+
+try:
+    import requests
+except Exception:
+    requests = None
+
+try:
+    import cv2
+except Exception:
+    cv2 = None
 
 RTSP_URL = os.getenv("RTSP_URL")  # e.g. rtsp://user:pass@ip:554/stream
 PLATE_API_TOKEN = os.getenv("PLATE_API_TOKEN")  # Plate Recognizer API key
@@ -24,6 +32,8 @@ def authorized_headers():
 
 
 def take_snapshot(rtsp):
+    if cv2 is None:
+        raise RuntimeError("OpenCV (cv2) is required for RTSP snapshots")
     cap = cv2.VideoCapture(rtsp)
     ok, frame = cap.read()
     cap.release()
@@ -37,6 +47,8 @@ def take_snapshot(rtsp):
 
 
 def alpr_lookup(jpeg_bytes):
+    if requests is None:
+        raise RuntimeError("requests is required for Plate Recognizer calls")
     url = "https://api.platerecognizer.com/v1/plate-reader/"
     headers = {"Authorization": f"Token {PLATE_API_TOKEN}"}
     files = {"upload": ("frame.jpg", io.BytesIO(jpeg_bytes), "image/jpeg")}
@@ -46,6 +58,8 @@ def alpr_lookup(jpeg_bytes):
 
 
 def door_status():
+    if requests is None:
+        return "Unknown"
     try:
         r = requests.get(f"{GARAGEPI_URL}/status", timeout=4)
         return r.json().get("status", "Unknown")
@@ -54,7 +68,12 @@ def door_status():
 
 
 def open_door():
-    requests.post(f"{GARAGEPI_URL}/toggle", headers=authorized_headers(), timeout=4)
+    if requests is None:
+        raise RuntimeError("requests is required for GaragePi calls")
+    resp = requests.post(
+        f"{GARAGEPI_URL}/toggle", headers=authorized_headers(), timeout=4
+    )
+    resp.raise_for_status()
 
 
 def safe_to_open(now):
@@ -62,7 +81,7 @@ def safe_to_open(now):
     if now - last_open_ts < OPEN_COOLDOWN_S:
         return False
     st = door_status()
-    return st in ("Closed", "Unknown")  # don't spam while moving/open
+    return st == "Closed"  # don't toggle if state is open, moving, or unknown
 
 
 def main():

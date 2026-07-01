@@ -91,16 +91,26 @@
   {% endif %}
 
   <script>
-    const API_TOKEN = ""; // if you enabled API auth in app.py
+    const API_TOKEN_REQUIRED = {{ api_token_required|tojson }};
+    let apiToken = localStorage.getItem("garagepi_api_token") || "";
 
     const btn  = document.getElementById("toggle-btn");
     const cmEl = document.getElementById("cm-switch");
     let busy = false;
 
+    function ensureToken(){
+      if(!API_TOKEN_REQUIRED || apiToken) return true;
+      const supplied = window.prompt("API token");
+      if(!supplied) return false;
+      apiToken = supplied.trim();
+      localStorage.setItem("garagepi_api_token", apiToken);
+      return true;
+    }
+
     function headersJson(){
       return {
         "Content-Type":"application/json",
-        ...(API_TOKEN? {"Authorization":"Bearer "+API_TOKEN}:{})
+        ...(apiToken? {"Authorization":"Bearer "+apiToken}:{})
       };
     }
 
@@ -108,7 +118,9 @@
       busy = !!on;
       if(btn){
         if(on) btn.setAttribute("disabled","disabled");
-        else btn.removeAttribute("disabled");
+        else if(!cmEl.classList.contains("on") && ["open", "closed"].includes(document.body.className)){
+          btn.removeAttribute("disabled");
+        }
       }
     }
 
@@ -150,11 +162,18 @@
 
     async function toggleDoor(){
       if(busy) return;
+      if(!ensureToken()) return;
       setBusy(true);
       try{
         const res = await fetch("/toggle", {method:"POST", headers: headersJson()});
-        if(res.status === 403){
+        if(res.status === 401){
+          localStorage.removeItem("garagepi_api_token");
+          apiToken = "";
+          ensureToken();
+        }else if(res.status === 403){
           alert("Door operation blocked (Close Mode is enabled).");
+        }else if(res.status === 429){
+          alert("Door operation ignored; try again in a moment.");
         }
       }finally{
         setTimeout(()=>setBusy(false), 1200);
@@ -163,13 +182,20 @@
     }
 
     async function toggleCloseMode(){
+      if(!ensureToken()) return;
       const enable = !cmEl.classList.contains("on");
       try{
-        await fetch("/set_close_mode", {
+        const res = await fetch("/set_close_mode", {
           method:"POST",
           headers: headersJson(),
           body: JSON.stringify({enabled: enable})
         });
+        if(res.status === 401){
+          localStorage.removeItem("garagepi_api_token");
+          apiToken = "";
+          ensureToken();
+          return;
+        }
         setCloseModeUI(enable);
         if(enable && btn) btn.setAttribute("disabled","disabled");
         setTimeout(refresh, 200);
@@ -179,6 +205,7 @@
     if(btn)  btn.addEventListener("click", toggleDoor);
     cmEl.addEventListener("click", toggleCloseMode);
 
+    ensureToken();
     refresh();
     setInterval(refresh, 1500);
   </script>

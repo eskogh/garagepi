@@ -6,12 +6,28 @@ except Exception:
     mqttlib = None
 
 
-def connect(client_id: str, host: str, port: int, user: str = "", password: str = ""):
+def connect(
+    client_id: str,
+    host: str,
+    port: int,
+    user: str = "",
+    password: str = "",
+    on_connect=None,
+    on_message=None,
+):
     if not mqttlib:
         return None
-    client = mqttlib.Client(client_id=client_id, clean_session=True)
+    client = mqttlib.Client(
+        callback_api_version=mqttlib.CallbackAPIVersion.VERSION2,
+        client_id=client_id,
+        clean_session=True,
+    )
     if user:
         client.username_pw_set(user, password or None)
+    if on_connect:
+        client.on_connect = on_connect
+    if on_message:
+        client.on_message = on_message
     client.connect(host, port, keepalive=30)
     client.loop_start()
     return client

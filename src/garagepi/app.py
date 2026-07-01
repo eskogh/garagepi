@@ -3,10 +3,31 @@ import time
 import threading
 import signal
 import atexit
+from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request, abort
 from .gpio import setup_default
 from . import mqtt as hamq
+
+
+def _load_dotenv() -> None:
+    """Load simple KEY=VALUE pairs before module-level settings are read."""
+    candidates = (Path.cwd() / ".env", Path(__file__).with_name(".env"))
+    for path in candidates:
+        if not path.exists():
+            continue
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip("'\"")
+            if key:
+                os.environ.setdefault(key, value)
+
+
+_load_dotenv()
 
 # --- Pins / timings ---
 PIN_TRIGGER = int(os.getenv("PIN_TRIGGER", "4"))
@@ -14,6 +35,7 @@ PIN_SENSOR_OPEN = int(os.getenv("PIN_SENSOR_OPEN", "14"))
 PIN_SENSOR_CLOSED = int(os.getenv("PIN_SENSOR_CLOSED", "16"))
 TRIGGER_PULSE_S = float(os.getenv("TRIGGER_PULSE_S", "0.5"))
 MIN_TOGGLE_GAP_S = float(os.getenv("MIN_TOGGLE_GAP_S", "2.0"))
+CLOSE_MODE_RETRY_S = float(os.getenv("CLOSE_MODE_RETRY_S", "30.0"))
 
 # --- API auth (optional) ---
 API_TOKEN = os.getenv("API_TOKEN", "").strip()
@@ -36,11 +58,16 @@ TOPIC_CM_STATE = f"{BASE}/close_mode/state"
 
 GPIO, ON_PI = setup_default(PIN_TRIGGER, PIN_SENSOR_OPEN, PIN_SENSOR_CLOSED)
 app = Flask(__name__, template_folder="templates")
+app.config["API_TOKEN_REQUIRED"] = bool(API_TOKEN)
 
 close_mode = False
 last_toggle = 0.0
+last_close_enforce = 0.0
 _last_published_state = None
 _mq = None  # paho client
+_runtime_started = False
+_runtime_lock = threading.Lock()
+_toggle_lock = threading.Lock()
 
 
 # --- helpers ---
@@ -74,6 +101,17 @@ def pulse_trigger() -> None:
     GPIO.output(PIN_TRIGGER, 0)
 
 
+def _pulse_if_allowed() -> bool:
+    global last_toggle
+    with _toggle_lock:
+        now = time.time()
+        if now - last_toggle < MIN_TOGGLE_GAP_S:
+            return False
+        last_toggle = now
+        pulse_trigger()
+        return True
+
+
 def _publish_availability(state: str) -> None:
     if _mq:
         _mq.publish(TOPIC_AVAIL, state, qos=1, retain=True)
@@ -94,11 +132,22 @@ def _publish_close_mode() -> None:
 
 
 def _handle_cover_command(payload: str) -> None:
-    # Many motors are toggle-only; map OPEN/CLOSE/STOP to one pulse.
-    if close_mode and payload.upper() in ("OPEN", "CLOSE"):
+    command = payload.strip().upper()
+    state = check_door_status()
+
+    if command == "OPEN":
+        if close_mode or state != "Closed":
+            return
+    elif command == "CLOSE":
+        if state != "Open":
+            return
+    elif command == "STOP":
+        if state != "Moving":
+            return
+    else:
         return
-    _rate_limit()
-    pulse_trigger()
+
+    _pulse_if_allowed()
 
 
 def _handle_cm_command(payload: str) -> None:
@@ -111,28 +160,9 @@ def _handle_cm_command(payload: str) -> None:
     _publish_close_mode()
 
 
-def _rate_limit() -> None:
-    global last_toggle
-    now = time.time()
-    if now - last_toggle < MIN_TOGGLE_GAP_S:
-        return
-    last_toggle = now
-
-
 # --- MQTT setup ---
 def _mqtt_start() -> None:
     global _mq
-    _mq = hamq.connect(
-        client_id=MQTT_CLIENT_ID,
-        host=MQTT_HOST,
-        port=MQTT_PORT,
-        user=MQTT_USER,
-        password=MQTT_PASSWORD,
-    )
-    if not _mq:
-        print("MQTT not available; continuing without broker.")
-        return
-
     def on_connect(client, userdata, flags, reason_code, properties=None):
         try:
             hamq.publish_discovery(
@@ -163,8 +193,23 @@ def _mqtt_start() -> None:
         except Exception as e:  # noqa: BLE001
             print("MQTT message error:", e)
 
-    _mq.on_connect = on_connect
-    _mq.on_message = on_message
+    try:
+        _mq = hamq.connect(
+            client_id=MQTT_CLIENT_ID,
+            host=MQTT_HOST,
+            port=MQTT_PORT,
+            user=MQTT_USER,
+            password=MQTT_PASSWORD,
+            on_connect=on_connect,
+            on_message=on_message,
+        )
+    except Exception as e:  # noqa: BLE001
+        print("MQTT not available; continuing without broker:", e)
+        _mq = None
+        return
+
+    if not _mq:
+        print("MQTT not available; continuing without broker.")
 
 
 def _mqtt_stop() -> None:
@@ -181,11 +226,17 @@ def _mqtt_stop() -> None:
 
 # --- Background loops ---
 def enforce_close_loop() -> None:
+    global last_close_enforce
     while True:
         try:
-            if close_mode and check_door_status() == "Open":
-                _rate_limit()
-                pulse_trigger()
+            now = time.time()
+            if (
+                close_mode
+                and check_door_status() == "Open"
+                and now - last_close_enforce >= CLOSE_MODE_RETRY_S
+            ):
+                if _pulse_if_allowed():
+                    last_close_enforce = now
         except Exception as e:  # noqa: BLE001
             print("enforce_close_loop error:", e)
         time.sleep(5)
@@ -204,7 +255,10 @@ def state_publish_loop() -> None:
 @app.route("/")
 def index():
     return render_template(
-        "index.html", door_status=check_door_status(), close_mode=close_mode
+        "index.html",
+        door_status=check_door_status(),
+        close_mode=close_mode,
+        api_token_required=bool(API_TOKEN),
     )
 
 
@@ -218,8 +272,8 @@ def toggle():
     _require_token()
     if close_mode:
         abort(403, "Close Mode is enabled")
-    _rate_limit()
-    pulse_trigger()
+    if not _pulse_if_allowed():
+        abort(429, "Too many door operations")
     return jsonify({"status": "Toggled"})
 
 
@@ -243,6 +297,16 @@ def _start_threads() -> None:
     threading.Thread(target=state_publish_loop, daemon=True).start()
 
 
+def start_runtime() -> None:
+    global _runtime_started
+    with _runtime_lock:
+        if _runtime_started:
+            return
+        _mqtt_start()
+        _start_threads()
+        _runtime_started = True
+
+
 def _on_exit(*_):
     try:
         _mqtt_stop()
@@ -257,7 +321,3 @@ def _on_exit(*_):
 atexit.register(_on_exit)
 signal.signal(signal.SIGTERM, _on_exit)
 signal.signal(signal.SIGINT, _on_exit)
-
-_mqtt_start()
-_publish_availability("online")
-_start_threads()
