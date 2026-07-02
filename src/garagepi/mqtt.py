@@ -1,4 +1,5 @@
 import json
+from typing import Any, Callable, Optional
 
 try:
     import paho.mqtt.client as mqttlib
@@ -12,9 +13,10 @@ def connect(
     port: int,
     user: str = "",
     password: str = "",
-    on_connect=None,
-    on_message=None,
-):
+    on_connect: Optional[Callable[..., None]] = None,
+    on_disconnect: Optional[Callable[..., None]] = None,
+    on_message: Optional[Callable[..., None]] = None,
+) -> Any:
     if not mqttlib:
         return None
     client = mqttlib.Client(
@@ -26,16 +28,26 @@ def connect(
         client.username_pw_set(user, password or None)
     if on_connect:
         client.on_connect = on_connect
+    if on_disconnect:
+        client.on_disconnect = on_disconnect
     if on_message:
         client.on_message = on_message
+    client.reconnect_delay_set(min_delay=1, max_delay=120)
     client.connect(host, port, keepalive=30)
     client.loop_start()
     return client
 
 
 def publish_discovery(
-    c, prefix, node_id, avail, state_topic, cmd_topic, cm_state, cm_set
-):
+    c: Any,
+    prefix: str,
+    node_id: str,
+    avail: str,
+    state_topic: str,
+    cmd_topic: str,
+    cm_state: str,
+    cm_set: str,
+) -> None:
     if not c:
         return
     cover_cfg_topic = f"{prefix}/cover/{node_id}/cover/config"

@@ -3,15 +3,31 @@ import time
 import threading
 import signal
 import atexit
+import logging
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
+from typing import Optional
 
-from flask import Flask, jsonify, render_template, request, abort
+from flask import Flask, Response, abort, jsonify, render_template, request
 from .gpio import setup_default
 from . import mqtt as hamq
+
+log = logging.getLogger(__name__)
 
 
 def _load_dotenv() -> None:
     """Load simple KEY=VALUE pairs before module-level settings are read."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        load_dotenv = None
+
+    if load_dotenv:
+        load_dotenv(Path.cwd() / ".env")
+        load_dotenv(Path(__file__).with_name(".env"))
+        return
+
     candidates = (Path.cwd() / ".env", Path(__file__).with_name(".env"))
     for path in candidates:
         if not path.exists():
@@ -29,41 +45,100 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
-# --- Pins / timings ---
-PIN_TRIGGER = int(os.getenv("PIN_TRIGGER", "4"))
-PIN_SENSOR_OPEN = int(os.getenv("PIN_SENSOR_OPEN", "14"))
-PIN_SENSOR_CLOSED = int(os.getenv("PIN_SENSOR_CLOSED", "16"))
-TRIGGER_PULSE_S = float(os.getenv("TRIGGER_PULSE_S", "0.5"))
-MIN_TOGGLE_GAP_S = float(os.getenv("MIN_TOGGLE_GAP_S", "2.0"))
-CLOSE_MODE_RETRY_S = float(os.getenv("CLOSE_MODE_RETRY_S", "30.0"))
 
-# --- API auth (optional) ---
-API_TOKEN = os.getenv("API_TOKEN", "").strip()
+class DoorState(Enum):
+    OPEN = "open"
+    CLOSED = "closed"
+    MOVING = "moving"
+    UNKNOWN = "unknown"
 
-# --- MQTT / HA ---
-MQTT_HOST = os.getenv("MQTT_HOST", "localhost")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
-MQTT_USER = os.getenv("MQTT_USER", "")
-MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
-MQTT_CLIENT_ID = os.getenv("MQTT_CLIENT_ID", "garagepi")
-DISCOVERY_PREFIX = os.getenv("DISCOVERY_PREFIX", "homeassistant")
-NODE_ID = os.getenv("NODE_ID", "garagepi")
-BASE = os.getenv("MQTT_BASE", "garagepi")
+    @property
+    def label(self) -> str:
+        return self.value.title()
 
-TOPIC_AVAIL = f"{BASE}/availability"
-TOPIC_COVER_SET = f"{BASE}/cover/set"
-TOPIC_COVER_STATE = f"{BASE}/cover/state"
-TOPIC_CM_SET = f"{BASE}/close_mode/set"
-TOPIC_CM_STATE = f"{BASE}/close_mode/state"
 
-GPIO, ON_PI = setup_default(PIN_TRIGGER, PIN_SENSOR_OPEN, PIN_SENSOR_CLOSED)
-app = Flask(__name__, template_folder="templates")
-app.config["API_TOKEN_REQUIRED"] = bool(API_TOKEN)
+@dataclass(frozen=True)
+class Topics:
+    availability: str
+    cover_set: str
+    cover_state: str
+    close_mode_set: str
+    close_mode_state: str
+
+    @classmethod
+    def from_base(cls, base: str) -> "Topics":
+        return cls(
+            availability=f"{base}/availability",
+            cover_set=f"{base}/cover/set",
+            cover_state=f"{base}/cover/state",
+            close_mode_set=f"{base}/close_mode/set",
+            close_mode_state=f"{base}/close_mode/state",
+        )
+
+
+@dataclass(frozen=True)
+class Config:
+    trigger_pin: int
+    sensor_open_pin: int
+    sensor_closed_pin: int
+    trigger_pulse_s: float
+    min_toggle_gap_s: float
+    close_mode_retry_s: float
+    api_token: str
+    mqtt_host: str
+    mqtt_port: int
+    mqtt_user: str
+    mqtt_password: str
+    mqtt_client_id: str
+    discovery_prefix: str
+    node_id: str
+    mqtt_base: str
+
+    @property
+    def topics(self) -> Topics:
+        return Topics.from_base(self.mqtt_base)
+
+    @classmethod
+    def from_env(cls) -> "Config":
+        return cls(
+            trigger_pin=int(os.getenv("PIN_TRIGGER", "4")),
+            sensor_open_pin=int(os.getenv("PIN_SENSOR_OPEN", "14")),
+            sensor_closed_pin=int(os.getenv("PIN_SENSOR_CLOSED", "16")),
+            trigger_pulse_s=float(os.getenv("TRIGGER_PULSE_S", "0.5")),
+            min_toggle_gap_s=float(os.getenv("MIN_TOGGLE_GAP_S", "2.0")),
+            close_mode_retry_s=float(os.getenv("CLOSE_MODE_RETRY_S", "30.0")),
+            api_token=os.getenv("API_TOKEN", "").strip(),
+            mqtt_host=os.getenv("MQTT_HOST", "localhost"),
+            mqtt_port=int(os.getenv("MQTT_PORT", "1883")),
+            mqtt_user=os.getenv("MQTT_USER", ""),
+            mqtt_password=os.getenv("MQTT_PASSWORD", ""),
+            mqtt_client_id=os.getenv("MQTT_CLIENT_ID", "garagepi"),
+            discovery_prefix=os.getenv("DISCOVERY_PREFIX", "homeassistant"),
+            node_id=os.getenv("NODE_ID", "garagepi"),
+            mqtt_base=os.getenv("MQTT_BASE", "garagepi"),
+        )
+
+
+config = Config.from_env()
+GPIO, ON_PI = setup_default(
+    config.trigger_pin,
+    config.sensor_open_pin,
+    config.sensor_closed_pin,
+)
+
+
+def _build_app() -> Flask:
+    created_app = Flask(__name__, template_folder="templates")
+    created_app.config["API_TOKEN_REQUIRED"] = bool(config.api_token)
+    return created_app
+
+
+app = _build_app()
 
 close_mode = False
 last_toggle = 0.0
 last_close_enforce = 0.0
-_last_published_state = None
+_last_published_state: Optional[str] = None
 _mq = None  # paho client
 _runtime_started = False
 _runtime_lock = threading.Lock()
@@ -73,39 +148,43 @@ _toggle_lock = threading.Lock()
 # --- helpers ---
 def _require_token() -> None:
     """Enforce Bearer token for mutating endpoints if API_TOKEN is set."""
-    if not API_TOKEN:
+    if not config.api_token:
         return
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         abort(401, "Missing bearer token")
     supplied = auth.split(" ", 1)[1].strip()
-    if supplied != API_TOKEN:
+    if supplied != config.api_token:
         abort(401, "Invalid token")
 
 
-def check_door_status() -> str:
-    is_open = GPIO.input(PIN_SENSOR_OPEN) == 1
-    is_closed = GPIO.input(PIN_SENSOR_CLOSED) == 1
+def get_door_state() -> DoorState:
+    is_open = GPIO.input(config.sensor_open_pin) == 1
+    is_closed = GPIO.input(config.sensor_closed_pin) == 1
     if is_open and not is_closed:
-        return "Open"
+        return DoorState.OPEN
     if is_closed and not is_open:
-        return "Closed"
+        return DoorState.CLOSED
     if not is_open and not is_closed:
-        return "Moving"
-    return "Unknown"
+        return DoorState.MOVING
+    return DoorState.UNKNOWN
+
+
+def check_door_status() -> str:
+    return get_door_state().label
 
 
 def pulse_trigger() -> None:
-    GPIO.output(PIN_TRIGGER, 1)
-    time.sleep(TRIGGER_PULSE_S)
-    GPIO.output(PIN_TRIGGER, 0)
+    GPIO.output(config.trigger_pin, 1)
+    time.sleep(config.trigger_pulse_s)
+    GPIO.output(config.trigger_pin, 0)
 
 
 def _pulse_if_allowed() -> bool:
     global last_toggle
     with _toggle_lock:
         now = time.time()
-        if now - last_toggle < MIN_TOGGLE_GAP_S:
+        if now - last_toggle < config.min_toggle_gap_s:
             return False
         last_toggle = now
         pulse_trigger()
@@ -114,35 +193,40 @@ def _pulse_if_allowed() -> bool:
 
 def _publish_availability(state: str) -> None:
     if _mq:
-        _mq.publish(TOPIC_AVAIL, state, qos=1, retain=True)
+        _mq.publish(config.topics.availability, state, qos=1, retain=True)
 
 
 def _publish_state_if_changed(force: bool = False) -> None:
     global _last_published_state
-    state = check_door_status().lower()
+    state = get_door_state().value
     if force or state != _last_published_state:
         _last_published_state = state
         if _mq:
-            _mq.publish(TOPIC_COVER_STATE, state, qos=1, retain=True)
+            _mq.publish(config.topics.cover_state, state, qos=1, retain=True)
 
 
 def _publish_close_mode() -> None:
     if _mq:
-        _mq.publish(TOPIC_CM_STATE, "ON" if close_mode else "OFF", qos=1, retain=True)
+        _mq.publish(
+            config.topics.close_mode_state,
+            "ON" if close_mode else "OFF",
+            qos=1,
+            retain=True,
+        )
 
 
 def _handle_cover_command(payload: str) -> None:
     command = payload.strip().upper()
-    state = check_door_status()
+    state = get_door_state()
 
     if command == "OPEN":
-        if close_mode or state != "Closed":
+        if close_mode or state is not DoorState.CLOSED:
             return
     elif command == "CLOSE":
-        if state != "Open":
+        if state is not DoorState.OPEN:
             return
     elif command == "STOP":
-        if state != "Moving":
+        if state is not DoorState.MOVING:
             return
     else:
         return
@@ -163,53 +247,62 @@ def _handle_cm_command(payload: str) -> None:
 # --- MQTT setup ---
 def _mqtt_start() -> None:
     global _mq
+
     def on_connect(client, userdata, flags, reason_code, properties=None):
         try:
             hamq.publish_discovery(
                 client,
-                DISCOVERY_PREFIX,
-                NODE_ID,
-                TOPIC_AVAIL,
-                TOPIC_COVER_STATE,
-                TOPIC_COVER_SET,
-                TOPIC_CM_STATE,
-                TOPIC_CM_SET,
+                config.discovery_prefix,
+                config.node_id,
+                config.topics.availability,
+                config.topics.cover_state,
+                config.topics.cover_set,
+                config.topics.close_mode_state,
+                config.topics.close_mode_set,
             )
-            client.subscribe(TOPIC_COVER_SET, qos=1)
-            client.subscribe(TOPIC_CM_SET, qos=1)
+            client.subscribe(config.topics.cover_set, qos=1)
+            client.subscribe(config.topics.close_mode_set, qos=1)
             _publish_availability("online")
             _publish_state_if_changed(force=True)
             _publish_close_mode()
         except Exception as e:  # noqa: BLE001
-            print("MQTT connect handling failed:", e)
+            log.exception("MQTT connect handling failed: %s", e)
+
+    def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
+        if reason_code:
+            log.warning(
+                "MQTT disconnected; reconnect loop will continue: %s",
+                reason_code,
+            )
 
     def on_message(client, userdata, msg):
         try:
             payload = (msg.payload or b"").decode().strip()
-            if msg.topic == TOPIC_COVER_SET:
+            if msg.topic == config.topics.cover_set:
                 _handle_cover_command(payload)
-            elif msg.topic == TOPIC_CM_SET:
+            elif msg.topic == config.topics.close_mode_set:
                 _handle_cm_command(payload)
         except Exception as e:  # noqa: BLE001
-            print("MQTT message error:", e)
+            log.exception("MQTT message error: %s", e)
 
     try:
         _mq = hamq.connect(
-            client_id=MQTT_CLIENT_ID,
-            host=MQTT_HOST,
-            port=MQTT_PORT,
-            user=MQTT_USER,
-            password=MQTT_PASSWORD,
+            client_id=config.mqtt_client_id,
+            host=config.mqtt_host,
+            port=config.mqtt_port,
+            user=config.mqtt_user,
+            password=config.mqtt_password,
             on_connect=on_connect,
+            on_disconnect=on_disconnect,
             on_message=on_message,
         )
     except Exception as e:  # noqa: BLE001
-        print("MQTT not available; continuing without broker:", e)
+        log.warning("MQTT not available; continuing without broker: %s", e)
         _mq = None
         return
 
     if not _mq:
-        print("MQTT not available; continuing without broker.")
+        log.warning("MQTT not available; continuing without broker.")
 
 
 def _mqtt_stop() -> None:
@@ -232,13 +325,13 @@ def enforce_close_loop() -> None:
             now = time.time()
             if (
                 close_mode
-                and check_door_status() == "Open"
-                and now - last_close_enforce >= CLOSE_MODE_RETRY_S
+                and get_door_state() is DoorState.OPEN
+                and now - last_close_enforce >= config.close_mode_retry_s
             ):
                 if _pulse_if_allowed():
                     last_close_enforce = now
         except Exception as e:  # noqa: BLE001
-            print("enforce_close_loop error:", e)
+            log.exception("enforce_close_loop error: %s", e)
         time.sleep(5)
 
 
@@ -247,28 +340,28 @@ def state_publish_loop() -> None:
         try:
             _publish_state_if_changed()
         except Exception as e:  # noqa: BLE001
-            print("state_publish_loop error:", e)
+            log.exception("state_publish_loop error: %s", e)
         time.sleep(1.0)
 
 
 # --- Flask routes ---
 @app.route("/")
-def index():
+def index() -> str:
     return render_template(
         "index.html",
         door_status=check_door_status(),
         close_mode=close_mode,
-        api_token_required=bool(API_TOKEN),
+        api_token_required=bool(config.api_token),
     )
 
 
 @app.route("/status")
-def status():
+def status() -> Response:
     return jsonify({"status": check_door_status(), "close_mode": close_mode})
 
 
 @app.route("/toggle", methods=["POST"])
-def toggle():
+def toggle() -> Response:
     _require_token()
     if close_mode:
         abort(403, "Close Mode is enabled")
@@ -278,7 +371,7 @@ def toggle():
 
 
 @app.route("/set_close_mode", methods=["POST"])
-def set_close_mode():
+def set_close_mode() -> Response:
     _require_token()
     global close_mode
     data = request.get_json(force=True)
@@ -287,7 +380,7 @@ def set_close_mode():
     return jsonify({"close_mode": close_mode})
 
 
-def create_app():
+def create_app() -> Flask:
     return app
 
 
@@ -307,7 +400,7 @@ def start_runtime() -> None:
         _runtime_started = True
 
 
-def _on_exit(*_):
+def _on_exit(*_) -> None:
     try:
         _mqtt_stop()
     except Exception:
