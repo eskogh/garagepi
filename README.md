@@ -24,8 +24,12 @@ Pull-downs assumed; invert in code if your wiring differs.
 ```bash
 sudo apt update
 sudo apt install -y python3-pip
-pip install -e .
+make install
 ```
+
+`make install` performs a production preflight and exits before installing if the
+system is not Raspberry Pi compatible. Use `make dev` for development installs
+on non-Pi machines.
 
 ---
 
