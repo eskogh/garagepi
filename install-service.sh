@@ -50,23 +50,31 @@ UNIT_NAME="garagepi.service"
 UNIT_DST="/etc/systemd/system/${UNIT_NAME}"
 ENV_FILE="/etc/default/garagepi"
 
-# Prefer installed console entrypoint; fall back to module
-if command -v garagepi >/dev/null 2>&1; then
-  EXEC_CMD="$(command -v garagepi)"
-else
-  EXEC_CMD="$(command -v python3) -m garagepi"
-  warn "console script 'garagepi' not found; will run '${EXEC_CMD}'. Ensure the package is installed (e.g. 'pip install -e .')."
-fi
+EXEC_CMD="$(command -v python3) -m garagepi"
 
 # ---------- interactive config ----------
 echo "=== GaragePi Setup ==="
+DEFAULT_SERVICE_USER="${SUDO_USER:-pi}"
+if ! id -u "${DEFAULT_SERVICE_USER}" >/dev/null 2>&1; then
+  DEFAULT_SERVICE_USER="$(id -un)"
+fi
+SERVICE_USER=$(prompt "Linux user to run GaragePi service" "${DEFAULT_SERVICE_USER}")
+if ! id -u "${SERVICE_USER}" >/dev/null 2>&1; then
+  err "User does not exist: ${SERVICE_USER}"
+  exit 1
+fi
+SERVICE_GROUPS="$(id -nG "${SERVICE_USER}")"
+if [[ " ${SERVICE_GROUPS} " != *" gpio "* ]]; then
+  warn "User '${SERVICE_USER}' is not in the gpio group; GPIO access may fail."
+fi
+
 HOST=$(prompt "Host to bind Flask" "0.0.0.0")
 PORT=$(prompt "Port for Flask" "5000")
 API_TOKEN=$(prompt "API token for securing /toggle and /set_close_mode" "changeme")
 
 PIN_TRIGGER=$(prompt "BCM pin for relay trigger (PIN_TRIGGER)" "4")
-PIN_SENSOR_OPEN=$(prompt "BCM pin for OPEN sensor (PIN_SENSOR_OPEN)" "14")
-PIN_SENSOR_CLOSED=$(prompt "BCM pin for CLOSED sensor (PIN_SENSOR_CLOSED)" "16")
+PIN_SENSOR_OPEN=$(prompt "BCM pin for OPEN sensor, blank to disable (PIN_SENSOR_OPEN)" "")
+PIN_SENSOR_CLOSED=$(prompt "BCM pin for CLOSED/single sensor, blank to disable (PIN_SENSOR_CLOSED)" "")
 
 TRIGGER_PULSE_S=$(prompt "Relay pulse length (seconds) (TRIGGER_PULSE_S)" "0.5")
 MIN_TOGGLE_GAP_S=$(prompt "Minimum toggle gap (seconds) (MIN_TOGGLE_GAP_S)" "2.0")
@@ -90,9 +98,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
+User=${SERVICE_USER}
 WorkingDirectory=${REPO_ROOT}
 EnvironmentFile=${ENV_FILE}
+Environment=PYTHONPATH=${REPO_ROOT}/src:${REPO_ROOT}/.vendor
 ExecStart=${EXEC_CMD}
 Restart=always
 RestartSec=5

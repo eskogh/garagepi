@@ -8,11 +8,11 @@ check-install-system:
 
 # Install project in editable mode
 install: check-install-system
-	$(PIP) install -e .
+	$(PIP) install --no-build-isolation -e .
 
 # Install with dev extras (pytest, ruff, black, etc.)
 dev:
-	$(PIP) install -e .[dev]
+	$(PIP) install --no-build-isolation -e .[dev]
 
 # Freeze all installed deps into requirements.txt
 freeze:

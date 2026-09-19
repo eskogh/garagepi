@@ -41,9 +41,14 @@ except Exception:
     GPIO = _Shim()
 
 
-def setup_default(trigger: int, s_open: int, s_closed: int):
+def setup_default(trigger: int, s_open=None, s_closed=None):
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(trigger, GPIO.OUT)
-    GPIO.setup(s_open, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-    GPIO.setup(s_closed, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+
+    if s_open is not None:
+        GPIO.setup(s_open, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+    if s_closed is not None:
+        GPIO.setup(s_closed, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
     return GPIO, ON_PI

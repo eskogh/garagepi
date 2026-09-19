@@ -13,9 +13,15 @@ A tiny Flask app to control a garage door relay on Raspberry Pi GPIO, with:
 ## Hardware
 
 - **PIN_TRIGGER**: relay/optocoupler to the motor controller push-button input
-- **PIN_SENSOR_OPEN**: magnetic/reed or limit switch for *open*
-- **PIN_SENSOR_CLOSED**: magnetic/reed or limit switch for *closed*
-Pull-downs assumed; invert in code if your wiring differs.
+- **PIN_SENSOR_OPEN**: optional magnetic/reed or limit switch for *open*
+- **PIN_SENSOR_CLOSED**: optional magnetic/reed or limit switch for *closed*
+
+Sensor modes:
+- No sensors configured: the UI shows a generic trigger button.
+- One sensor configured: set `PIN_SENSOR_CLOSED`; active means closed, inactive means open.
+- Two sensors configured: set both `PIN_SENSOR_OPEN` and `PIN_SENSOR_CLOSED`.
+
+GPIO inputs must never receive 12V. Use dry relay contacts, an optocoupler, or a proper level shifter so the Pi only sees 0V/3.3V. Pull-downs are assumed; invert in code if your wiring differs.
 
 ---
 
@@ -45,8 +51,12 @@ API_TOKEN=changeme  # optional
 
 # GPIO pins (BCM)
 PIN_TRIGGER=4
-PIN_SENSOR_OPEN=14
-PIN_SENSOR_CLOSED=16
+
+# Sensors are optional. Leave blank for relay-only mode.
+# One-sensor mode: set only PIN_SENSOR_CLOSED.
+# Two-sensor mode: set both.
+PIN_SENSOR_OPEN=
+PIN_SENSOR_CLOSED=
 
 # Behavior
 TRIGGER_PULSE_S=0.5
@@ -61,6 +71,9 @@ MQTT_CLIENT_ID=garagepi
 DISCOVERY_PREFIX=homeassistant
 NODE_ID=garagepi
 MQTT_BASE=garagepi
+
+# Optional camera panel
+CAMERA_URL=rtsp://10.13.37.233:8554/cam7
 ```
 
 ---
@@ -118,6 +131,10 @@ journalctl -u garagepi -f
 - Close mode state: `garagepi/close_mode/state` → `ON` / `OFF`
 
 > Note: Many garage motors use a *toggle* input; all cover commands map to a single relay pulse. State correctness comes from your sensors.
+
+## Camera Panel
+
+Set `CAMERA_URL` to the stream URL shown in the UI camera panel.
 
 ---
 

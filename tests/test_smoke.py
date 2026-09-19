@@ -28,6 +28,17 @@ def test_pulse_if_allowed_blocks_second_pulse(monkeypatch):
 def test_check_door_status_reads_sensor_combinations():
     from garagepi import app as garage_app
 
+    monkeypatch_config = replace(
+        garage_app.config,
+        sensor_open_pin=14,
+        sensor_closed_pin=16,
+    )
+    garage_app.config = monkeypatch_config
+    garage_app.sensor_snapshots = {
+        "open": garage_app._empty_sensor("Open sensor", 14),
+        "closed": garage_app._empty_sensor("Closed sensor", 16),
+    }
+
     garage_app.GPIO.output(garage_app.config.sensor_open_pin, 1)
     garage_app.GPIO.output(garage_app.config.sensor_closed_pin, 0)
     assert garage_app.get_door_state() is garage_app.DoorState.OPEN

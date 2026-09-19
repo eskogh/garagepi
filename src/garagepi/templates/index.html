@@ -4,18 +4,20 @@
   <meta charset="UTF-8" />
   <title>Garage Door Control</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
+  <style type="text/css">
     @import url("https://fonts.googleapis.com/css?family=Raleway");
     :root{
-      --glow-color-open:  hsl(111, 94%, 44%);
-      --glow-color-closed:hsl(32, 94%, 45%);
+      --glow-color-open: hsl(0, 87%, 50%);
+      --glow-color-closed: hsl(106, 92%, 34%);
       --glow-color-moving:hsl(0, 0%, 66%);
+      --glow-color-unsensored: hsl(204, 100%, 55%);
       --glow-color-error: hsl(0, 100%, 38%);
       --glow-color: var(--glow-color-moving);
     }
     body.open   { --glow-color: var(--glow-color-open); }
     body.closed { --glow-color: var(--glow-color-closed); }
     body.moving { --glow-color: var(--glow-color-moving); }
+    body.unsensored { --glow-color: var(--glow-color-unsensored); }
     body.unknown, body.error { --glow-color: var(--glow-color-error); }
 
     *,*::before,*::after{ box-sizing:border-box; }
@@ -28,18 +30,18 @@
     .glowing-btn{
       position:relative; color:var(--glow-color); cursor:pointer; padding:.35em 1em;
       border:.15em solid var(--glow-color); border-radius:.45em; background:none; perspective:2em;
-      font-size:2em; font-weight:900; letter-spacing:1em;
+      font-size:2em; font-weight:400; letter-spacing:1em;
       box-shadow: inset 0 0 .5em 0 var(--glow-color), 0 0 .5em 0 var(--glow-color);
       animation:border-flicker 2s linear infinite; transition: transform .12s ease;
     }
     .glowing-btn[disabled]{ cursor:not-allowed; opacity:.6; filter:grayscale(40%); animation:none; }
-    .glowing-txt{ float:left; margin-right:-.8em; text-shadow:0 0 .125em hsl(0 0% 100% / .3), 0 0 .45em var(--glow-color); animation:text-flicker 3s linear infinite; }
-    .faulty-letter{ opacity:.5; animation:faulty-flicker 2s linear infinite; }
-    .glowing-btn::before{ content:""; position:absolute; inset:0; opacity:.7; filter:blur(1em); transform:translateY(120%) rotateX(95deg) scale(1,.35); background:#000; pointer-events:none; }
-    .glowing-btn::after{ content:""; position:absolute; inset:0; opacity:0; z-index:-1; background:#000; box-shadow:0 0 2em .2em var(--glow-color); transition:opacity 100ms linear; }
+    .glowing-txt{ float:left; margin-right:-.8em; color:var(--glow-color) !important; -webkit-text-fill-color:var(--glow-color); text-shadow:0 0 .125em hsl(0 0% 100% / .3), 0 0 .45em var(--glow-color); animation:text-flicker 3s linear infinite; }
+    .faulty-letter{ color:inherit; -webkit-text-fill-color:inherit; opacity:.5; animation:faulty-flicker 2s linear infinite; }
+    .glowing-btn::before{ content:""; position:absolute; inset:0; opacity:.7; filter:blur(1em); transform:translateY(120%) rotateX(95deg) scale(1,.35); border-radius:inherit; background:var(--glow-color); pointer-events:none; }
+    .glowing-btn::after{ content:""; position:absolute; inset:0; opacity:0; z-index:-1; border-radius:inherit; background:var(--glow-color); box-shadow:0 0 2em .2em var(--glow-color); transition:opacity 100ms linear; }
     .glowing-btn:hover:not([disabled]){ color:rgba(0,0,0,.8); text-shadow:none; animation:none; }
-    .glowing-btn:hover:not([disabled]) .glowing-txt{ animation:none; }
-    .glowing-btn:hover:not([disabled]) .faulty-letter{ animation:none; opacity:1; }
+    .glowing-btn:hover:not([disabled]) .glowing-txt{ color:rgba(0,0,0,.8) !important; -webkit-text-fill-color:rgba(0,0,0,.8); text-shadow:none; animation:none; }
+    .glowing-btn:hover:not([disabled]) .faulty-letter{ color:inherit; text-shadow:none; animation:none; opacity:1; }
     .glowing-btn:hover:not([disabled])::before{ filter:blur(1.5em); opacity:1; }
     .glowing-btn:hover:not([disabled])::after{ opacity:1; }
 
@@ -47,11 +49,15 @@
     @keyframes text-flicker{ 0%{opacity:.1} 2%{opacity:1} 8%{opacity:.1} 9%{opacity:1} 12%{opacity:.1} 20%{opacity:1} 25%{opacity:.3} 30%{opacity:1} 70%{opacity:.7} 72%{opacity:.2} 77%{opacity:.9} 100%{opacity:.9} }
     @keyframes border-flicker{ 0%{opacity:.1} 2%{opacity:1} 4%{opacity:.1} 8%{opacity:1} 70%{opacity:.7} 100%{opacity:1} }
     @media (prefers-reduced-motion: reduce){ .glowing-btn, .glowing-txt, .faulty-letter{ animation:none !important; } }
-    @media (max-width:600px){ .glowing-btn{ font-size:1.25em; letter-spacing:.6em; } }
+    @media (max-width:600px){ .glowing-btn{ font-size:1em; letter-spacing:.6em; } }
 
-    /* Tiny Close-mode pill */
-    .pill {
+    /* Tiny control pills */
+    .top-controls {
       position: fixed; top: 14px; right: 14px;
+      display: flex; flex-direction: column; gap: 8px; align-items: flex-end;
+      z-index: 10;
+    }
+    .pill {
       display:flex; align-items:center; gap:.6rem;
       background: rgba(20,20,20,.7);
       color: #ddd; padding:.5rem .8rem; border-radius:999px;
@@ -69,26 +75,128 @@
     }
     .switch.on { background:#0fa; }
     .switch.on::after { left:23px; background:#fff; }
+
+    body.stats-hidden .diagnostics { display: none; }
+    .diagnostics {
+      position: fixed; left: 14px; right: 14px; bottom: 14px;
+      display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px;
+      color: #ddd; font-size: .82rem; line-height: 1.25;
+      pointer-events: none;
+    }
+    .diag-item {
+      min-width: 0; padding: .65rem .75rem; border-radius: 8px;
+      background: rgba(18,18,18,.72);
+      border: 1px solid rgba(255,255,255,.1);
+      backdrop-filter: blur(4px);
+    }
+    .diag-title {
+      display: flex; justify-content: space-between; gap: .7rem;
+      color: #fff; font-weight: 700; margin-bottom: .35rem;
+    }
+    .diag-state { color: var(--glow-color); text-transform: uppercase; }
+    .diag-line { display: flex; justify-content: space-between; gap: .7rem; color: #aaa; }
+    .diag-line span:last-child { color: #eee; text-align: right; overflow-wrap: anywhere; }
+    .diag-note {
+      grid-column: 1 / -1; color: #aaa; text-align: center;
+      background: rgba(18,18,18,.45); border: 1px solid rgba(255,255,255,.07);
+      border-radius: 8px; padding: .45rem .75rem;
+    }
+    .camera-panel {
+      position: fixed; top: 14px; left: 14px;
+      width: min(420px, calc(100vw - 28px));
+      background: rgba(18,18,18,.78);
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 8px;
+      backdrop-filter: blur(4px);
+      overflow: hidden;
+      z-index: 9;
+      display: none;
+    }
+    body.camera-visible .camera-panel { display: block; }
+    .camera-title {
+      display: flex; justify-content: space-between; gap: .75rem;
+      padding: .55rem .7rem; color: #eee; font-size: .82rem; font-weight: 700;
+    }
+    .camera-url { color: #aaa; font-weight: 400; overflow-wrap: anywhere; text-align: right; }
+    .camera-panel video {
+      display: block; width: 100%; aspect-ratio: 16 / 9;
+      background: #050505;
+    }
+    .camera-fallback {
+      padding: .55rem .7rem; color: #aaa; font-size: .78rem; line-height: 1.3;
+      border-top: 1px solid rgba(255,255,255,.08);
+    }
+    @media (max-width:760px){
+      html, body{ overflow:auto; }
+      body{ min-height:100vh; padding: 72px 14px 220px; }
+      .diagnostics{ grid-template-columns: 1fr; }
+      .top-controls{ left: 14px; align-items: stretch; }
+      .pill{ justify-content: space-between; }
+      .camera-panel{ top: 138px; }
+    }
   </style>
 </head>
 
-<body class="{{ door_status|lower }}">
-  <!-- Close-mode pill -->
-  <div class="pill" title="Auto-close (Close Mode)">
-    <span>Close&nbsp;Mode</span>
-    <div id="cm-switch" class="switch{{ ' on' if close_mode else '' }}"></div>
+<body class="{{ 'unsensored' if sensor_mode == 'none' else door_status|lower }}">
+  <div class="top-controls">
+    <!-- Close-mode pill -->
+    <div class="pill" title="Auto-close (Close Mode)">
+      <span>Close&nbsp;Mode</span>
+      <div id="cm-switch" class="switch{{ ' on' if close_mode else '' }}"></div>
+    </div>
+    <div class="pill" title="Show sensor and motor diagnostics">
+      <span>Stats</span>
+      <div id="stats-switch" class="switch on"></div>
+    </div>
+    <div class="pill" title="Show camera stream">
+      <span>Camera</span>
+      <div id="camera-switch" class="switch"></div>
+    </div>
   </div>
 
   <!-- Main neon button -->
-  {% if door_status == "Closed" %}
-    <button class="glowing-btn" id="toggle-btn"><span class='glowing-txt'>OP<span class='faulty-letter'>E</span>N</span></button>
+  {% if sensor_mode == "none" %}
+    <button class="glowing-btn" id="toggle-btn" data-darkreader-ignore><span class='glowing-txt'>TRIG<span class='faulty-letter'>G</span>ER</span></button>
+  {% elif door_status == "Closed" %}
+    <button class="glowing-btn" id="toggle-btn" data-darkreader-ignore><span class='glowing-txt'>OP<span class='faulty-letter'>E</span>N</span></button>
   {% elif door_status == "Open" %}
-    <button class="glowing-btn" id="toggle-btn"><span class='glowing-txt'>C<span class='faulty-letter'>L</span>OSE</span></button>
+    <button class="glowing-btn" id="toggle-btn" data-darkreader-ignore><span class='glowing-txt'>C<span class='faulty-letter'>L</span>OSE</span></button>
   {% elif door_status == "Moving" %}
-    <button class="glowing-btn" id="toggle-btn" disabled><span class='glowing-txt'>IN <span class='faulty-letter'>P</span>RO<span class='faulty-letter'>G</span>RESS</span></button>
+    <button class="glowing-btn" id="toggle-btn" data-darkreader-ignore disabled><span class='glowing-txt'>IN <span class='faulty-letter'>P</span>RO<span class='faulty-letter'>G</span>RESS</span></button>
   {% else %}
-    <button class="glowing-btn" id="toggle-btn" disabled><span class='glowing-txt'><span class='faulty-letter'>CHECK&nbsp;SENSORS</span></span></button>
+    <button class="glowing-btn" id="toggle-btn" data-darkreader-ignore disabled><span class='glowing-txt'><span class='faulty-letter'>CHECK&nbsp;SENSORS</span></span></button>
   {% endif %}
+
+  <div class="diagnostics" aria-live="polite">
+    <div class="diag-item">
+      <div class="diag-title"><span>Open Sensor</span><span id="diag-open-mode" class="diag-state">...</span></div>
+      <div class="diag-line"><span>Pin</span><span id="diag-open-pin">...</span></div>
+      <div class="diag-line"><span>Connected</span><span id="diag-open-connected">...</span></div>
+      <div class="diag-line"><span>Last change</span><span id="diag-open-changed">...</span></div>
+    </div>
+    <div class="diag-item">
+      <div class="diag-title"><span>Closed Sensor</span><span id="diag-closed-mode" class="diag-state">...</span></div>
+      <div class="diag-line"><span>Pin</span><span id="diag-closed-pin">...</span></div>
+      <div class="diag-line"><span>Connected</span><span id="diag-closed-connected">...</span></div>
+      <div class="diag-line"><span>Last change</span><span id="diag-closed-changed">...</span></div>
+    </div>
+    <div class="diag-item">
+      <div class="diag-title"><span>Motor</span><span id="diag-health" class="diag-state">...</span></div>
+      <div class="diag-line"><span>Trigger pin</span><span id="diag-trigger-pin">...</span></div>
+      <div class="diag-line"><span>Last trigger</span><span id="diag-triggered">...</span></div>
+      <div class="diag-line"><span>Door state</span><span id="diag-door-state">...</span></div>
+    </div>
+    <div id="diag-note" class="diag-note">...</div>
+  </div>
+
+  <div id="camera-panel" class="camera-panel">
+    <!-- <div class="camera-title">
+      <span>Camera</span>
+      <span class="camera-url">{{ camera_url }}</span>
+    </div> -->
+    <video id="camera-stream" data-src="{{ camera_url }}" autoplay muted playsinline controls></video>
+    <!-- <div class="camera-fallback">If the stream stays blank, check that this browser can play the configured stream URL.</div> -->
+  </div>
 
   <script>
     const API_TOKEN_REQUIRED = {{ api_token_required|tojson }};
@@ -96,6 +204,11 @@
 
     const btn  = document.getElementById("toggle-btn");
     const cmEl = document.getElementById("cm-switch");
+    const statsEl = document.getElementById("stats-switch");
+    const cameraEl = document.getElementById("camera-switch");
+    const cameraStream = document.getElementById("camera-stream");
+    const DOOR_STATE_CLASSES = ["open", "closed", "moving", "unsensored", "unknown", "error"];
+    let sensorMode = {{ sensor_mode|tojson }};
     let busy = false;
 
     function ensureToken(){
@@ -118,7 +231,7 @@
       busy = !!on;
       if(btn){
         if(on) btn.setAttribute("disabled","disabled");
-        else if(!cmEl.classList.contains("on") && ["open", "closed"].includes(document.body.className)){
+        else if(!cmEl.classList.contains("on") && (sensorMode === "none" || document.body.classList.contains("open") || document.body.classList.contains("closed"))){
           btn.removeAttribute("disabled");
         }
       }
@@ -128,11 +241,47 @@
       cmEl.classList.toggle("on", !!on);
     }
 
-    function setBodyState(state){
-      document.body.className = (state || "unknown").toLowerCase();
+    function setStatsUI(on){
+      document.body.classList.toggle("stats-hidden", !on);
+      statsEl.classList.toggle("on", !!on);
+      localStorage.setItem("garagepi_stats_visible", on ? "1" : "0");
+    }
+
+    function setCameraUI(on){
+      document.body.classList.toggle("camera-visible", !!on);
+      cameraEl.classList.toggle("on", !!on);
+      localStorage.setItem("garagepi_camera_visible", on ? "1" : "0");
+      if(cameraStream){
+        if(on && !cameraStream.getAttribute("src")){
+          cameraStream.setAttribute("src", cameraStream.dataset.src);
+          cameraStream.load();
+          cameraStream.play().catch(()=>{});
+        }else if(!on){
+          cameraStream.pause();
+          cameraStream.removeAttribute("src");
+          cameraStream.load();
+        }
+      }
+    }
+
+    function setDoorBodyClass(stateClass){
+      document.body.classList.remove(...DOOR_STATE_CLASSES);
+      document.body.classList.add(stateClass);
+    }
+
+    function setBodyState(state, mode){
+      sensorMode = mode || sensorMode || "dual";
+      if(sensorMode === "none"){
+        setDoorBodyClass("unsensored");
+      }else{
+        setDoorBodyClass((state || "unknown").toLowerCase());
+      }
       // also alter button label:
       if(!btn) return;
-      if(state === "Closed"){
+      if(sensorMode === "none"){
+        btn.innerHTML = "<span class='glowing-txt'>TRIG<span class='faulty-letter'>G</span>ER</span>";
+        btn.removeAttribute("disabled");
+      }else if(state === "Closed"){
         btn.innerHTML = "<span class='glowing-txt'>OP<span class='faulty-letter'>E</span>N</span>";
         btn.removeAttribute("disabled");
       }else if(state === "Open"){
@@ -147,15 +296,48 @@
       }
     }
 
+    function fmtTime(value){
+      if(!value) return "never";
+      const parsed = new Date(value);
+      if(Number.isNaN(parsed.getTime())) return value;
+      return parsed.toLocaleString();
+    }
+
+    function setText(id, value){
+      const el = document.getElementById(id);
+      if(el) el.textContent = value;
+    }
+
+    function updateSensorDiag(prefix, sensor){
+      if(!sensor) return;
+      setText(`diag-${prefix}-mode`, sensor.mode || "unknown");
+      setText(`diag-${prefix}-pin`, sensor.pin ?? "unknown");
+      setText(`diag-${prefix}-connected`, sensor.connected ? "readable" : "no");
+      setText(`diag-${prefix}-changed`, fmtTime(sensor.last_changed));
+    }
+
+    function updateDiagnostics(data){
+      const diag = data && data.diagnostics;
+      if(!diag) return;
+      updateSensorDiag("open", diag.sensors && diag.sensors.open);
+      updateSensorDiag("closed", diag.sensors && diag.sensors.closed);
+      setText("diag-health", diag.sensor_health || "unknown");
+      setText("diag-trigger-pin", diag.motor ? diag.motor.trigger_pin : "unknown");
+      setText("diag-triggered", fmtTime(diag.motor && diag.motor.last_triggered_at));
+      setText("diag-door-state", data.status || "unknown");
+      setText("diag-note", diag.sensor_note || "");
+    }
+
     async function refresh(){
       try{
         const res = await fetch("/status", {headers: headersJson()});
         const data = await res.json();
-        setBodyState(data.status);
+        setBodyState(data.status, data.diagnostics && data.diagnostics.sensor_mode);
         setCloseModeUI(data.close_mode);
+        updateDiagnostics(data);
         if(data.close_mode && btn) btn.setAttribute("disabled","disabled");
       }catch(e){
-        document.body.className = "error";
+        setDoorBodyClass("error");
         if(btn) btn.setAttribute("disabled","disabled");
       }
     }
@@ -202,9 +384,21 @@
       }catch(e){}
     }
 
+    function toggleStats(){
+      setStatsUI(!statsEl.classList.contains("on"));
+    }
+
+    function toggleCamera(){
+      setCameraUI(!cameraEl.classList.contains("on"));
+    }
+
     if(btn)  btn.addEventListener("click", toggleDoor);
     cmEl.addEventListener("click", toggleCloseMode);
+    statsEl.addEventListener("click", toggleStats);
+    cameraEl.addEventListener("click", toggleCamera);
 
+    setStatsUI(localStorage.getItem("garagepi_stats_visible") !== "0");
+    setCameraUI(localStorage.getItem("garagepi_camera_visible") === "1");
     ensureToken();
     refresh();
     setInterval(refresh, 1500);

@@ -5,15 +5,31 @@ import signal
 import atexit
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TypedDict
 
 from flask import Flask, Response, abort, jsonify, render_template, request
+
 from .gpio import setup_default
 from . import mqtt as hamq
 
 log = logging.getLogger(__name__)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+service_started_at = _utc_now_iso()
+
+
+def _optional_pin(name: str, default: str = "") -> Optional[int]:
+    raw = os.getenv(name, default).strip()
+    if not raw or raw.lower() in {"none", "off", "disabled"}:
+        return None
+    return int(raw)
 
 
 def _load_dotenv() -> None:
@@ -64,6 +80,8 @@ class Topics:
     cover_state: str
     close_mode_set: str
     close_mode_state: str
+    sensor_open: str
+    sensor_closed: str
 
     @classmethod
     def from_base(cls, base: str) -> "Topics":
@@ -73,14 +91,16 @@ class Topics:
             cover_state=f"{base}/cover/state",
             close_mode_set=f"{base}/close_mode/set",
             close_mode_state=f"{base}/close_mode/state",
+            sensor_open=f"{base}/sensor/open",
+            sensor_closed=f"{base}/sensor/closed",
         )
 
 
 @dataclass(frozen=True)
 class Config:
     trigger_pin: int
-    sensor_open_pin: int
-    sensor_closed_pin: int
+    sensor_open_pin: Optional[int]
+    sensor_closed_pin: Optional[int]
     trigger_pulse_s: float
     min_toggle_gap_s: float
     close_mode_retry_s: float
@@ -93,6 +113,7 @@ class Config:
     discovery_prefix: str
     node_id: str
     mqtt_base: str
+    camera_url: str
 
     @property
     def topics(self) -> Topics:
@@ -102,8 +123,8 @@ class Config:
     def from_env(cls) -> "Config":
         return cls(
             trigger_pin=int(os.getenv("PIN_TRIGGER", "4")),
-            sensor_open_pin=int(os.getenv("PIN_SENSOR_OPEN", "14")),
-            sensor_closed_pin=int(os.getenv("PIN_SENSOR_CLOSED", "16")),
+            sensor_open_pin=_optional_pin("PIN_SENSOR_OPEN", "15"),
+            sensor_closed_pin=_optional_pin("PIN_SENSOR_CLOSED", "14"),
             trigger_pulse_s=float(os.getenv("TRIGGER_PULSE_S", "0.5")),
             min_toggle_gap_s=float(os.getenv("MIN_TOGGLE_GAP_S", "2.0")),
             close_mode_retry_s=float(os.getenv("CLOSE_MODE_RETRY_S", "30.0")),
@@ -116,6 +137,10 @@ class Config:
             discovery_prefix=os.getenv("DISCOVERY_PREFIX", "homeassistant"),
             node_id=os.getenv("NODE_ID", "garagepi"),
             mqtt_base=os.getenv("MQTT_BASE", "garagepi"),
+            camera_url=os.getenv(
+                "CAMERA_URL",
+                "http://10.13.37.233:1984/api/stream.m3u8?src=cam7",
+            ).strip(),
         )
 
 
@@ -125,6 +150,41 @@ GPIO, ON_PI = setup_default(
     config.sensor_open_pin,
     config.sensor_closed_pin,
 )
+
+
+class SensorSnapshot(TypedDict):
+    name: str
+    pin: Optional[int]
+    raw: Optional[int]
+    mode: str
+    active: bool
+    readable: bool
+    connected: bool
+    last_changed: Optional[str]
+    last_read: Optional[str]
+    error: str
+
+
+def _empty_sensor(name: str, pin: Optional[int]) -> SensorSnapshot:
+    return {
+        "name": name,
+        "pin": pin,
+        "raw": None,
+        "mode": "disabled" if pin is None else "unknown",
+        "active": False,
+        "readable": False,
+        "connected": False,
+        "last_changed": None,
+        "last_read": None,
+        "error": "",
+    }
+
+
+sensor_snapshots = {
+    "open": _empty_sensor("Open sensor", config.sensor_open_pin),
+    "closed": _empty_sensor("Closed sensor", config.sensor_closed_pin),
+}
+last_motor_triggered_at: Optional[str] = None
 
 
 def _build_app() -> Flask:
@@ -141,6 +201,7 @@ last_close_enforce = 0.0
 _last_published_state: Optional[str] = None
 _mq = None  # paho client
 _runtime_started = False
+_shutdown_done = False
 _runtime_lock = threading.Lock()
 _toggle_lock = threading.Lock()
 
@@ -159,8 +220,15 @@ def _require_token() -> None:
 
 
 def get_door_state() -> DoorState:
-    is_open = GPIO.input(config.sensor_open_pin) == 1
-    is_closed = GPIO.input(config.sensor_closed_pin) == 1
+    sensors = read_sensor_snapshots()
+    configured = [sensor for sensor in sensors.values() if sensor["pin"] is not None]
+    if not configured:
+        return DoorState.UNKNOWN
+    if len(configured) == 1:
+        return DoorState.CLOSED if configured[0]["active"] else DoorState.OPEN
+
+    is_open = sensors["open"]["active"]
+    is_closed = sensors["closed"]["active"]
     if is_open and not is_closed:
         return DoorState.OPEN
     if is_closed and not is_open:
@@ -174,10 +242,148 @@ def check_door_status() -> str:
     return get_door_state().label
 
 
+def sensor_config_mode() -> str:
+    configured = [
+        pin
+        for pin in (config.sensor_open_pin, config.sensor_closed_pin)
+        if pin is not None
+    ]
+    if not configured:
+        return "none"
+    if len(configured) == 1:
+        return "single"
+    return "dual"
+
+
 def pulse_trigger() -> None:
+    global last_motor_triggered_at
+    last_motor_triggered_at = _utc_now_iso()
     GPIO.output(config.trigger_pin, 1)
     time.sleep(config.trigger_pulse_s)
     GPIO.output(config.trigger_pin, 0)
+
+
+def _update_sensor_snapshot(key: str, name: str, pin: Optional[int]) -> SensorSnapshot:
+    now = _utc_now_iso()
+    previous = sensor_snapshots[key]
+    if pin is None:
+        snapshot: SensorSnapshot = {
+            **previous,
+            "name": name,
+            "pin": None,
+            "raw": None,
+            "mode": "disabled",
+            "active": False,
+            "readable": False,
+            "connected": False,
+            "last_read": None,
+            "error": "",
+        }
+        sensor_snapshots[key] = snapshot
+        return snapshot
+
+    try:
+        raw = int(GPIO.input(pin))
+    except Exception as exc:  # noqa: BLE001
+        snapshot: SensorSnapshot = {
+            **previous,
+            "name": name,
+            "pin": pin,
+            "raw": None,
+            "mode": "read error",
+            "active": False,
+            "readable": False,
+            "connected": False,
+            "last_read": now,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        if previous["readable"]:
+            snapshot["last_changed"] = now
+        sensor_snapshots[key] = snapshot
+        return snapshot
+
+    active = raw == 0
+    mode = "active" if active else "inactive"
+    changed = (
+        previous["raw"] is None
+        or previous["raw"] != raw
+        or not previous["readable"]
+    )
+    snapshot = {
+        "name": name,
+        "pin": pin,
+        "raw": raw,
+        "mode": mode,
+        "active": active,
+        "readable": True,
+        "connected": True,
+        "last_changed": now if changed else previous["last_changed"],
+        "last_read": now,
+        "error": "",
+    }
+    sensor_snapshots[key] = snapshot
+    return snapshot
+
+
+def read_sensor_snapshots() -> dict[str, SensorSnapshot]:
+    return {
+        "open": _update_sensor_snapshot(
+            "open",
+            "Open sensor",
+            config.sensor_open_pin,
+        ),
+        "closed": _update_sensor_snapshot(
+            "closed",
+            "Closed sensor",
+            config.sensor_closed_pin,
+        ),
+    }
+
+
+def diagnostics() -> dict:
+    sensors = read_sensor_snapshots()
+    configured = [sensor for sensor in sensors.values() if sensor["pin"] is not None]
+    both_active = (
+        len(configured) == 2
+        and sensors["open"]["active"]
+        and sensors["closed"]["active"]
+    )
+    all_readable = all(sensor["readable"] for sensor in configured)
+    sensor_mode = (
+        "none" if not configured else "single" if len(configured) == 1 else "dual"
+    )
+    return {
+        "service_started_at": service_started_at,
+        "sensor_mode": sensor_mode,
+        "sensors": sensors,
+        "sensor_health": (
+            "disabled"
+            if not configured
+            else "conflict"
+            if both_active
+            else "ok"
+            if all_readable
+            else "read_error"
+        ),
+        "sensor_note": (
+            "No sensors configured; the button only sends a motor trigger."
+            if not configured
+            else "One-sensor mode: active means closed, inactive means open."
+            if len(configured) == 1 and all_readable
+            else "Both sensors are active; check wiring or sensor positions."
+            if both_active
+            else (
+                "GPIO reads are working. Last-change times are observed since "
+                "service start; simple pull-down sensors cannot prove wire continuity."
+            )
+            if all_readable
+            else "At least one GPIO read failed."
+        ),
+        "motor": {
+            "trigger_pin": config.trigger_pin,
+            "last_triggered_at": last_motor_triggered_at,
+        },
+    }
 
 
 def _pulse_if_allowed() -> bool:
@@ -217,6 +423,15 @@ def _publish_close_mode() -> None:
 
 def _handle_cover_command(payload: str) -> None:
     command = payload.strip().upper()
+    if command not in {"OPEN", "CLOSE", "STOP"}:
+        return
+
+    if sensor_config_mode() == "none":
+        if command == "OPEN" and close_mode:
+            return
+        _pulse_if_allowed()
+        return
+
     state = get_door_state()
 
     if command == "OPEN":
@@ -243,12 +458,50 @@ def _handle_cm_command(payload: str) -> None:
         close_mode = False
     _publish_close_mode()
 
+def _publish_sensor_states() -> None:
+    if not _mq:
+        return
+
+    sensors = read_sensor_snapshots()
+
+    if config.sensor_open_pin is not None:
+        _mq.publish(
+            config.topics.sensor_open,
+            "ON" if sensors["open"]["active"] else "OFF",
+            qos=1,
+            retain=True,
+        )
+
+    if config.sensor_closed_pin is not None:
+        _mq.publish(
+            config.topics.sensor_closed,
+            "ON" if sensors["closed"]["active"] else "OFF",
+            qos=1,
+            retain=True,
+        )
 
 # --- MQTT setup ---
 def _mqtt_start() -> None:
     global _mq
 
     def on_connect(client, userdata, flags, reason_code, properties=None):
+        if getattr(reason_code, "is_failure", False):
+            log.warning(
+                "MQTT connection refused by %s:%s for client_id=%r: %s",
+                config.mqtt_host,
+                config.mqtt_port,
+                config.mqtt_client_id,
+                reason_code,
+            )
+            return
+
+        log.info(
+            "MQTT connected to %s:%s as client_id=%r",
+            config.mqtt_host,
+            config.mqtt_port,
+            config.mqtt_client_id,
+        )
+
         try:
             hamq.publish_discovery(
                 client,
@@ -259,17 +512,24 @@ def _mqtt_start() -> None:
                 config.topics.cover_set,
                 config.topics.close_mode_state,
                 config.topics.close_mode_set,
+                config.topics.sensor_open,
+                config.topics.sensor_closed,
             )
+
             client.subscribe(config.topics.cover_set, qos=1)
             client.subscribe(config.topics.close_mode_set, qos=1)
+
             _publish_availability("online")
             _publish_state_if_changed(force=True)
+            _publish_sensor_states()
             _publish_close_mode()
+
         except Exception as e:  # noqa: BLE001
             log.exception("MQTT connect handling failed: %s", e)
-
+            
+            
     def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
-        if reason_code:
+        if getattr(reason_code, "is_failure", False):
             log.warning(
                 "MQTT disconnected; reconnect loop will continue: %s",
                 reason_code,
@@ -297,12 +557,32 @@ def _mqtt_start() -> None:
             on_message=on_message,
         )
     except Exception as e:  # noqa: BLE001
-        log.warning("MQTT not available; continuing without broker: %s", e)
+        log.warning(
+            "MQTT not available at %s:%s for client_id=%r: %s: %s",
+            config.mqtt_host,
+            config.mqtt_port,
+            config.mqtt_client_id,
+            type(e).__name__,
+            e,
+        )
         _mq = None
         return
 
-    if not _mq:
-        log.warning("MQTT not available; continuing without broker.")
+    if _mq is None:
+        log.warning(
+            "MQTT client unavailable for %s:%s with client_id=%r",
+            config.mqtt_host,
+            config.mqtt_port,
+            config.mqtt_client_id,
+        )
+        return
+
+    log.info(
+        "MQTT client started for %s:%s with client_id=%r; waiting for CONNACK",
+        config.mqtt_host,
+        config.mqtt_port,
+        config.mqtt_client_id,
+    )
 
 
 def _mqtt_stop() -> None:
@@ -350,14 +630,22 @@ def index() -> str:
     return render_template(
         "index.html",
         door_status=check_door_status(),
+        sensor_mode=sensor_config_mode(),
         close_mode=close_mode,
         api_token_required=bool(config.api_token),
+        camera_url=config.camera_url,
     )
 
 
 @app.route("/status")
 def status() -> Response:
-    return jsonify({"status": check_door_status(), "close_mode": close_mode})
+    return jsonify(
+        {
+            "status": check_door_status(),
+            "close_mode": close_mode,
+            "diagnostics": diagnostics(),
+        }
+    )
 
 
 @app.route("/toggle", methods=["POST"])
@@ -401,6 +689,10 @@ def start_runtime() -> None:
 
 
 def _on_exit(*_) -> None:
+    global _shutdown_done
+    if _shutdown_done:
+        return
+    _shutdown_done = True
     try:
         _mqtt_stop()
     except Exception:
@@ -411,6 +703,11 @@ def _on_exit(*_) -> None:
         pass
 
 
+def _on_signal(signum, frame) -> None:
+    _on_exit(signum, frame)
+    raise SystemExit(0)
+
+
 atexit.register(_on_exit)
-signal.signal(signal.SIGTERM, _on_exit)
-signal.signal(signal.SIGINT, _on_exit)
+signal.signal(signal.SIGTERM, _on_signal)
+signal.signal(signal.SIGINT, _on_signal)
